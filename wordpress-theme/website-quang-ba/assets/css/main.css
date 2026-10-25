@@ -449,6 +449,7 @@ button, input, textarea, select {
 .hero-title-highlight {
   background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-accent-cyan) 100%);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
