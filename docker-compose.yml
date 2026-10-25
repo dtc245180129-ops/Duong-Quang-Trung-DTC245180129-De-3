@@ -1,0 +1,525 @@
+# ==============================================================================
+# DOCKER COMPOSE - GIAI ĐOẠN 3: NGINX REVERSE PROXY, HTTPS & SECURITY HEADERS
+# Đề tài số 03: Website Quảng bá Sản phẩm bằng WordPress
+# Môn học: Triển khai và Quản trị Hệ thống Phần mềm
+# Sinh viên: Dương Quang Trung | MSV: DTC245180129
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 1: ĐIỂM TRUY CẬP DUY NHẤT - NGINX REVERSE PROXY & HTTPS ENTRY POINT
+  # ----------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.30.6-alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
+    networks:
+      - frontend-net
+    depends_on:
+      wordpress:
+        condition: service_healthy
+      phpmyadmin:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -q -O /dev/null https://127.0.0.1:443/ || wget -q -O /dev/null http://127.0.0.1:80/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 32M
+    mem_limit: 128M
+    cpus: 0.50
+    pids_limit: 50
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 2: ỨNG DỤNG WEBSITE QUẢNG BÁ SẢN PHẨM (WORDPRESS)
+  # ----------------------------------------------------------------------------
+  wordpress:
+    image: wordpress:6.7-php8.2-apache
+    container_name: wordpress
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_USER: ${MYSQL_USER}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD}
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
+      WORDPRESS_TABLE_PREFIX: ${WORDPRESS_TABLE_PREFIX:-wp_}
+      WORDPRESS_DEBUG: ${WORDPRESS_DEBUG:-0}
+      # Nhận diện chính xác giao thức HTTPS từ Nginx Reverse Proxy (Chống vòng lặp redirect)
+      WORDPRESS_CONFIG_EXTRA: |
+        if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
+            $$_SERVER['HTTPS'] = 'on';
+        }
+    volumes:
+      - wordpress_data:/var/www/html
+      - ./wordpress-theme/website-quang-ba:/var/www/html/wp-content/themes/website-quang-ba:ro
+    networks:
+      - frontend-net
+      - backend-net
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:80/wp-admin/install.php || curl -f http://localhost:80/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 256M
+    mem_limit: 512M
+    cpus: 1.00
+    pids_limit: 100
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 3: CÔNG CỤ QUẢN TRỊ CƠ SỞ DỮ LIỆU PHPMYADMIN
+  # ----------------------------------------------------------------------------
+  phpmyadmin:
+    image: phpmyadmin:5.2-apache
+    container_name: phpmyadmin
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_ARBITRARY: ${PMA_ARBITRARY:-0}
+      UPLOAD_LIMIT: 64M
+    networks:
+      - frontend-net
+      - backend-net
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:80/ || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 128M
+    mem_limit: 256M
+    cpus: 0.50
+    pids_limit: 60
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 4: HỆ QUẢN TRỊ CƠ SỞ DỮ LIỆU MYSQL
+  # ----------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    restart: unless-stopped
+    command:
+      - --default-authentication-plugin=caching_sha2_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_EXPORTER_USER: ${MYSQL_EXPORTER_USER:-exporter}
+      MYSQL_EXPORTER_PASSWORD: ${MYSQL_EXPORTER_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend-net
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u $$MYSQL_USER --password=$$MYSQL_PASSWORD || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 384M
+    mem_limit: 768M
+    cpus: 1.00
+    pids_limit: 150
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 5: MÁY CHỦ THU THẬP VÀ LƯU TRỮ METRICS (PROMETHEUS)
+  # ----------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.53.3
+    container_name: prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - monitoring-net
+    depends_on:
+      - node-exporter
+      - cadvisor
+      - mysql-exporter
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O- http://localhost:9090/-/healthy || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 256M
+    mem_limit: 512M
+    cpus: 0.50
+    pids_limit: 100
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 6: BẢNG ĐIỀU KHIỂN TRỰC QUAN HÓA CHỈ SỐ METRICS (GRAFANA)
+  # ----------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    networks:
+      - monitoring-net
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O- http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 128M
+    mem_limit: 256M
+    cpus: 0.50
+    pids_limit: 100
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 7: EXPORTER THU THẬP CHỈ SỐ HỆ THỐNG MÁY CHỦ (NODE EXPORTER)
+  # ----------------------------------------------------------------------------
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: node-exporter
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    networks:
+      - monitoring-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O- http://localhost:9100/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 24M
+    mem_limit: 64M
+    cpus: 0.20
+    pids_limit: 30
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 8: EXPORTER THU THẬP CHỈ SỐ CONTAINER DOCKER (CADVISOR)
+  # ----------------------------------------------------------------------------
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    restart: unless-stopped
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:ro
+      - /dev/disk/:ro
+    networks:
+      - monitoring-net
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O- http://localhost:8080/healthz || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 64M
+    mem_limit: 192M
+    cpus: 0.30
+    pids_limit: 50
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 9: EXPORTER THU THẬP CHỈ SỐ CSDL MYSQL (MYSQL EXPORTER)
+  # Lưu ý bảo mật: Tài khoản exporter dùng quyền SELECT ON *.* để tương thích
+  # với các collectors hệ thống; không có quyền sửa/xóa nhưng có thể đọc toàn bộ
+  # CSDL (kể cả bảng WordPress). Giới hạn MAX_USER_CONNECTIONS 3 chống nghẽn pool.
+  # ----------------------------------------------------------------------------
+  mysql-exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: mysql-exporter
+    restart: unless-stopped
+    environment:
+      MYSQLD_EXPORTER_PASSWORD: ${MYSQL_EXPORTER_PASSWORD}
+    command:
+      - '--mysqld.address=mysql:3306'
+      - '--mysqld.username=${MYSQL_EXPORTER_USER:-exporter}'
+    networks:
+      - backend-net
+      - monitoring-net
+    depends_on:
+      mysql:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O- http://localhost:9104/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 24M
+    mem_limit: 64M
+    cpus: 0.20
+    pids_limit: 30
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 10: MÁY CHỦ THU THẬP VÀ LƯU TRỮ NHẬT KÝ (GRAFANA LOKI)
+  # ----------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.7.9
+    container_name: loki
+    restart: unless-stopped
+    command:
+      - '-config.file=/etc/loki/loki-config.yml'
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    networks:
+      - monitoring-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O- http://localhost:3100/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 256M
+    mem_limit: 512M
+    cpus: 0.75
+    pids_limit: 100
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 11: AGENT THU GOM VÀ CHUYỂN TIẾP NHẬT KÝ (GRAFANA ALLOY)
+  # ----------------------------------------------------------------------------
+  alloy:
+    image: grafana/alloy:v1.21.2
+    container_name: alloy
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy/data
+    networks:
+      - monitoring-net
+      - docker-api-net
+    depends_on:
+      loki:
+        condition: service_healthy
+      docker-socket-proxy:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/12345' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 128M
+    mem_limit: 256M
+    cpus: 0.50
+    pids_limit: 100
+
+  # ----------------------------------------------------------------------------
+  # DỊCH VỤ 12: DOCKER SOCKET PROXY TRUNG GIAN (HAPROXY STRICT ALLOWLIST)
+  # ----------------------------------------------------------------------------
+  docker-socket-proxy:
+    image: haproxy:2.8.31-alpine
+    container_name: docker-socket-proxy
+    restart: unless-stopped
+    user: "0:0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./docker-socket-proxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - docker-api-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O- http://localhost:2375/_ping || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_reservation: 24M
+    mem_limit: 64M
+    cpus: 0.25
+    pids_limit: 30
+
+
+# ------------------------------------------------------------------------------
+# KHAI BÁO PHÂN TÁCH MẠNG NỘI BỘ (NETWORK ISOLATION)
+# ------------------------------------------------------------------------------
+networks:
+  # Mạng giao tiếp giữa Reverse Proxy (Nginx) và các ứng dụng Web (WordPress, phpMyAdmin)
+  frontend-net:
+    driver: bridge
+
+  # Mạng nội bộ lưu chuyển dữ liệu CSDL (Cô lập hoàn toàn khỏi Internet bên ngoài)
+  backend-net:
+    driver: bridge
+    internal: true
+
+  # Mạng nội bộ dành riêng cho hệ thống giám sát và logging (Prometheus, Grafana, Exporters, Loki, Alloy)
+  monitoring-net:
+    driver: bridge
+
+  # Mạng nội bộ bảo mật chỉ dành riêng cho giao tiếp Docker API giữa Alloy và HAProxy
+  docker-api-net:
+    driver: bridge
+    internal: true
+
+# ------------------------------------------------------------------------------
+# KHAI BÁO LƯU TRỮ BỀN VỮNG (PERSISTENT VOLUMES)
+# ------------------------------------------------------------------------------
+volumes:
+  # Lưu trữ mã nguồn, uploads, themes, plugins của WordPress
+  wordpress_data:
+    driver: local
+  # Lưu trữ bảng CSDL MySQL (Không bị mất dữ liệu khi container recreate)
+  db_data:
+    driver: local
+  # Lưu trữ cơ sở dữ liệu chuỗi thời gian TSDB của Prometheus
+  prometheus_data:
+    driver: local
+  # Lưu trữ cấu hình người dùng, sessions, dashboards tùy biến của Grafana
+  grafana_data:
+    driver: local
+  # Lưu trữ cơ sở dữ liệu chunks và chỉ mục TSDB của Grafana Loki
+  loki_data:
+    driver: local
+  # Lưu trữ trạng thái đọc log, positions và offset của Grafana Alloy
+  alloy_data:
+    driver: local
